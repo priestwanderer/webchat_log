@@ -45,5 +45,33 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(len(store.detail("webchat:1")["history"]),1)
 
 
+    def test_offline_retry_preserves_last_good_checkpoint(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as folder:
+            store=Store(Path(folder)/'db.sqlite3')
+            checkpoint={'time':'2026-10-08T00:00:00+00:00','id':'5'}
+            store.ingest([],source='webchat',checkpoint=checkpoint)
+            calls=[]
+            def transport(payload):
+                calls.append(payload)
+                if len(calls)==1:raise TimeoutError('测试连接中断')
+                return {'server_time':'2026-10-08T00:03:00Z','sources':{'webchat':{'items':[],'cursor':{'time':'2026-10-08T00:02:57Z','id':'0'},'has_more':False}}}
+            collector=Collector(store,{'sources':['webchat']},transport=transport)
+            with self.assertLogs(level='WARNING'):collector.poll_once()
+            self.assertEqual(collector.status()['state'],'offline')
+            self.assertEqual(store.checkpoint('webchat'),checkpoint)
+            collector.poll_once()
+            self.assertEqual(collector.status()['state'],'live')
+            self.assertEqual(calls[0]['cursors'],calls[1]['cursors'])
+
+    def test_backfill_keeps_exact_tuple_instead_of_rewinding(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as folder:
+            store=Store(Path(folder)/'db.sqlite3')
+            checkpoint={'time':'2026-10-08T00:00:00+00:00','id':'5','paging':True,'upper':'2026-10-08T01:00:00+00:00'}
+            store.ingest([],source='webchat',checkpoint=checkpoint)
+            def transport(payload):
+                self.assertEqual(payload['cursors']['webchat'],checkpoint)
+                return {'server_time':'2026-10-08T01:00:03Z','sources':{'webchat':{'items':[],'cursor':{'time':checkpoint['upper'],'id':'0','paging':False},'has_more':False}}}
+            Collector(store,{'sources':['webchat']},transport=transport).poll_once()
+
 if __name__ == "__main__":
     unittest.main()

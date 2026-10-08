@@ -12,15 +12,35 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+SENSITIVE_KEY = re.compile(r"password|passwd|secret|authorization|cookie|encrypted[_-]?token|api[_-]?key$|session[_-]?hash|^(?:access|refresh|id|auth|session)[_-]?token$|^token$", re.I)
+TEXT_KEY = r"(?:password|passwd|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|session[_-]?token|token|authorization|cookie|set-cookie)"
+
+
+def normalize_time(value):
+    dt = datetime.fromisoformat(str(value).replace('Z','+00:00'))
+    if dt.tzinfo is None:
+        raise ValueError('时间必须包含时区')
+    return dt.astimezone(timezone.utc).isoformat(timespec='microseconds')
+
+
 def redact(value: Any) -> Any:
     if isinstance(value, dict):
-        return {k: ("[已隐藏]" if re.search(r"password|secret|authorization|cookie|encrypted_token|api_key$|session_hash", k, re.I) else redact(v)) for k, v in value.items()}
+        return {k: ("[已隐藏]" if SENSITIVE_KEY.search(str(k)) else redact(v)) for k,v in value.items()}
     if isinstance(value, list):
         return [redact(v) for v in value]
     if isinstance(value, str):
-        value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[已隐藏]", value)
-        value = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}", "[已隐藏]", value)
-        value = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*)[^\s&,;]+", r"\1[已隐藏]", value)
+        stripped = value.strip()
+        if stripped.startswith(('{','[')):
+            try:
+                decoded = json.loads(value)
+                if isinstance(decoded,(dict,list)):
+                    return json.dumps(redact(decoded),ensure_ascii=False)
+            except (ValueError,RecursionError):
+                pass
+        value = re.sub(r'(?im)((?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n]+', r'\1[已隐藏]', value)
+        value = re.sub(r'(?i)(bearer\s+|basic\s+)[A-Za-z0-9._~+/=-]+',r'\1[已隐藏]',value)
+        value = re.sub(r'\bsk-[A-Za-z0-9_-]{8,}', '[已隐藏]', value)
+        value = re.sub(r'''(?i)(["']?''' + TEXT_KEY + r'''["']?\s*[=:]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s&,;}\]]+)''',r'\1"[已隐藏]"',value)
     return value
 
 
@@ -41,6 +61,35 @@ class Store:
                 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, name TEXT, email TEXT);
                 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, payload TEXT);
             """)
+        self.upgrade_storage()
+
+    def upgrade_storage(self):
+        if self.get_state('storage_version') == 2:
+            return
+        def clean(payload):
+            item=redact(json.loads(payload))
+            for field in ('created_at','updated_at'):
+                if item.get(field): item[field]=normalize_time(item[field])
+            if item.get('source') in ('message','tool') and not item.get('mapping_status'):
+                item['user_id']='unverified:'+item['source']+':'+str(item['id'])
+                item['mapping_status']='pending_recheck'
+                item['user_name']='未归属账号（待重新核对）'
+                item.pop('user_email',None)
+            return item,json.dumps(item,ensure_ascii=False,sort_keys=True)
+        with self.connect() as db:
+            db.execute('PRAGMA secure_delete=ON')
+            for row in db.execute('SELECT event_key,payload FROM events').fetchall():
+                item,payload=clean(row['payload'])
+                db.execute('UPDATE events SET user_id=?,created_at=?,updated_at=?,payload=? WHERE event_key=?',(item.get('user_id','unattributed'),item.get('created_at',''),item.get('updated_at',''),payload,row['event_key']))
+            for row in db.execute('SELECT id,payload FROM history').fetchall():
+                _,payload=clean(row['payload'])
+                db.execute('UPDATE history SET payload=?,digest=? WHERE id=?',(payload,hashlib.sha256(payload.encode()).hexdigest(),row['id']))
+            # 保留旧记录，重新补采关联与边界，去重后恢复确认过的账号归属。
+            db.execute('DELETE FROM checkpoints')
+            db.execute("INSERT OR REPLACE INTO state VALUES ('storage_version','2')")
+        with self.connect() as db:
+            db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            db.execute('VACUUM')
 
     @contextmanager
     def connect(self):
@@ -57,6 +106,8 @@ class Store:
         with self.connect() as db:
             for row in rows:
                 item = redact(dict(row))
+                for field in ("created_at","updated_at"):
+                    if item.get(field): item[field] = normalize_time(item[field])
                 item["id"] = str(item["id"])
                 item["user_id"] = str(item.get("user_id") or "unattributed")
                 item["key"] = item["source"] + ":" + item["id"]
@@ -104,12 +155,14 @@ class Store:
             text = "%"+q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")+"%"
             params.extend([text]*3)
         if since:
-            where.append("e.created_at>=?"); params.append(since)
+            where.append("e.created_at>=?"); params.append(normalize_time(since))
         if until:
-            where.append("e.created_at<=?"); params.append(until)
+            where.append("e.created_at<=?"); params.append(normalize_time(until))
         return (" WHERE "+" AND ".join(where) if where else ""), params
 
-    def query(self, limit=50, offset=0, **filters):
+    def query(self, limit=50, offset=0, grouped=False, **filters):
+        if grouped:
+            return self.grouped_query(limit=limit, offset=offset, **filters)
         clause, params = self._where(**filters)
         join = " FROM events e LEFT JOIN users u ON u.id=e.user_id"
         with self.connect() as db:
@@ -120,6 +173,68 @@ class Store:
             item = json.loads(row[0]); item.update(user_name=row[1] or item.get("user_name") or "未归属账号",user_email=row[2] or item.get("user_email") or "")
             items.append(item)
         return {"total":total,"items":items}
+
+    def grouped_query(self, limit=50, offset=0, **filters):
+        # Match records first, but resolve complete groups before pagination.
+        clause, params = self._where(**filters)
+        with self.connect() as db:
+            matched = {r[0] for r in db.execute('SELECT e.event_key FROM events e LEFT JOIN users u ON u.id=e.user_id'+clause, params)}
+            scope, values = self._where(user_id=filters.get('user_id', ''))
+            rows = db.execute('SELECT e.payload,u.name,u.email FROM events e LEFT JOIN users u ON u.id=e.user_id'+scope, values).fetchall()
+        records = []
+        for row in rows:
+            item = json.loads(row[0])
+            item.update(user_name=row[1] or item.get('user_name') or '未归属账号', user_email=row[2] or item.get('user_email') or '')
+            request = item.get('request_id') or ''
+            labels = {'title_generation':'标题','spark_prelude':'开场提示','follow_up_generation':'追问建议'}
+            item['task_type'] = labels.get(item.get('auxiliary_kind')) or ('标题' if request.startswith('req_title_') else '图片子请求' if '-img-call_' in request else '辅助任务' if request.startswith('req_aux_') else '主对话' if item['source']=='webchat' else {'gateway':'关联网关错误','message':'消息执行','tool':'工具执行','audio':'音频转写'}.get(item['source'],item['source']))
+            parent = item.get('parent_request_id') or item.get('trigger_request_id')
+            if not parent:
+                if request.startswith('req_title_'): parent = 'req_'+request[len('req_title_'):]
+                elif request.startswith('req_aux_aux:spark_prelude:'): parent = request.rsplit(':',1)[-1]
+                elif '-img-call_' in request and item['task_type']=='图片子请求': parent = request.split('-img-call_',1)[0]
+            item['parent_request_id'] = parent
+            item['matched'] = item['key'] in matched
+            records.append(item)
+        index = {}
+        for item in records:
+            if item['source']=='webchat' and item.get('request_id'):
+                index.setdefault((item['user_id'],item['request_id']),[]).append(item)
+        def parent_of(item):
+            request = item.get('parent_request_id')
+            if not request and item['source']=='gateway': request=item.get('client_request_id') or item.get('request_id')
+            candidates=index.get((item['user_id'],request),[])
+            return candidates[0] if len(candidates)==1 and candidates[0]['key']!=item['key'] else None
+        groups = {}
+        for item in records:
+            root=item; seen={item['key']}
+            while (parent:=parent_of(root)) is not None:
+                if parent['key'] in seen: root=item; break
+                seen.add(parent['key']);root=parent
+            group=groups.setdefault(root['key'],{**root,'children':[]})
+            if root['key']!=item['key']: group['children'].append(item)
+        selected = []
+        for group in groups.values():
+            members = [group]+group['children']
+            if not any(r['key'] in matched for r in members): continue
+            group['record_count'] = len(members)
+            group['matched_count'] = sum(r['key'] in matched for r in members)
+            group['error_count'] = sum(bool(r.get('is_error')) for r in members)
+            if group['task_type']!='主对话':
+                group['outcome']='未关联主请求 · '+('失败' if group.get('is_error') else group.get('status','未知'))
+            elif group.get('is_error'): group['outcome']='主任务失败'
+            elif group['status'] in {'completed','success','succeeded'}:
+                failures=[r for r in group['children'] if r.get('is_error')]
+                group['outcome']='主任务成功'
+                if any(r['task_type'] not in {'标题','开场提示','追问建议','辅助任务'} for r in failures): group['outcome']+='，子任务失败'
+                if any(r['task_type'] in {'标题','开场提示','追问建议','辅助任务'} for r in failures): group['outcome']+='，辅助任务失败'
+            else:
+                group['outcome']={'running':'主任务执行中','pending':'主任务等待中','cancelled':'主任务已取消','settlement_pending':'主任务待结算'}.get(group['status'],'主任务状态未知')
+            group['children'].sort(key=lambda r:(r.get('created_at',''),r['key']))
+            selected.append(group)
+        selected.sort(key=lambda r:(r.get('created_at',''),r['key']), reverse=True)
+        start = max(0,int(offset))
+        return {'total':len(selected), 'record_total':len(matched), 'items':selected[start:start+max(1,min(int(limit),200))]}
 
     def users(self):
         with self.connect() as db:

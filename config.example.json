@@ -1,0 +1,21 @@
+{
+  "ssh_host": "root@38.147.163.155",
+  "ssh_port": 22,
+  "ssh_identity_file": "",
+  "db_container": "migration-replica-postgres-production",
+  "db_port": 55432,
+  "db_user": "sub2api",
+  "poll_seconds": 10,
+  "initial_hours": 24,
+  "overlap_seconds": 120,
+  "batch_size": 500,
+  "sources": [
+    "webchat",
+    "audio",
+    "gateway",
+    "message",
+    "tool"
+  ],
+  "host": "127.0.0.1",
+  "port": 8765
+}

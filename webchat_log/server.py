@@ -45,10 +45,11 @@ def create_server(store, collector, host='127.0.0.1', port=8765):
             args={k:v[0] for k,v in parse_qs(parsed.query).items()}
             try:
                 if parsed.path=='/api/events':
-                    allowed={'user_id','mode','q','source','status','since','until','limit','offset'}
+                    allowed={'user_id','mode','q','source','status','since','until','limit','offset','grouped'}
                     args={k:v for k,v in args.items() if k in allowed}
                     args['limit']=int(args.get('limit',50));args['offset']=int(args.get('offset',0))
                     if args.get('mode','all') not in {'all','errors'}: raise ValueError('无效筛选')
+                    args['grouped']=args.get('grouped')=='true'
                     self.send_data(store.query(**args))
                 elif parsed.path=='/api/stats':
                     self.send_data(store.stats(**args))

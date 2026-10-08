@@ -1,7 +1,45 @@
-data/
+# 本地业务数据与私有配置
+/data/
+/config.json
+.env
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+*.log.*
+
+# 本地测试、探针与测试依赖（生产服务仅使用 Python 标准库）
+/tests/
+/probe_live.py
+/package.json
+/package-lock.json
+/node_modules/
+/artifacts/
+/test-results/
+/playwright-report/
+/blob-report/
+/coverage/
+/htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+.pytest_cache/
+
+# Python 缓存与本地环境
 __pycache__/
-*.pyc
-config.json
+*.py[cod]
 .venv/
-node_modules/
-artifacts/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# 编辑器与系统临时文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

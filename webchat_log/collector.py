@@ -22,6 +22,7 @@ class Collector:
     def __init__(self, store, config, transport=None):
         self.store = store
         self.config = {**DEFAULTS, **config}
+        self.config["batch_size"] = max(1,min(int(self.config["batch_size"]),2000))
         self.transport = transport or self.ssh_fetch
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
@@ -34,8 +35,6 @@ class Collector:
     def ssh_fetch(self, payload):
         encoded = base64.b64encode(json.dumps(payload).encode()).decode()
         source = Path(__file__).with_name('remote.py').read_text(encoding='utf-8')
-        script = base64.b64encode(source.encode()).decode()
-        runner = "import base64;exec(compile(base64.b64decode('"+script+"'),'<readonly-collector>','exec'))"
         import shlex
         remote_command = 'python3 - '+shlex.quote(encoded)
         command = ['ssh','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=12','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2','-p',str(self.config['ssh_port'])]

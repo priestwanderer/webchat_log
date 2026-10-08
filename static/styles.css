@@ -6,7 +6,7 @@
 /* 字号按信息层级调整，保留现有布局。 */
 body{font-size:15px}small{font-size:13px}
 :root{--muted:#626e7b}:root[data-theme="dark"]{--muted:#abb5c1}
-.shell{grid-template-columns:280px minmax(0,1fr)}main{min-width:0}
+.shell{grid-template-columns:clamp(300px,20vw,380px) minmax(0,1fr)}main{min-width:0}
 .brand{font-size:20px}.brand small,.side-heading{font-size:13px}.brand small{letter-spacing:0}
 .search-box input,.user-copy strong{font-size:14px}.user-copy small,.count{font-size:13px}
 .side-footer{font-size:13px}.side-footer small{font-size:13px;line-height:1.7}

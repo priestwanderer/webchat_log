@@ -1,3 +1,4 @@
+import gzip
 import json
 import logging
 import time
@@ -27,8 +28,37 @@ def create_server(store, collector, host='127.0.0.1', port=8765):
 
         def send_data(self, data, code=200, kind='application/json; charset=utf-8'):
             body = json.dumps(data,ensure_ascii=False).encode() if not isinstance(data,bytes) else data
+            compressed = False
+            # Parse tokens, never substrings: an explicit gzip;q=0 overrides '*'.
+            qualities = {}
+            for entry in ','.join(self.headers.get_all('Accept-Encoding', [])).split(','):
+                parts = entry.lower().strip().split(';')
+                quality = 1.0
+                for parameter in parts[1:]:
+                    key, _, value = parameter.strip().partition('=')
+                    if key == 'q':
+                        try:
+                            quality = float(value)
+                            if not 0 <= quality <= 1:
+                                quality = 0.0
+                        except ValueError:
+                            quality = 0.0
+                qualities[parts[0].strip()] = quality
+            gzip_quality = qualities.get('gzip', qualities.get('*', 0))
+            identity_allowed = qualities.get('identity', 0 if qualities.get('*') == 0 else 1) > 0
+            accepts_gzip = gzip_quality > 0 and gzip_quality >= qualities.get('identity', 0)
+            if accepts_gzip and (len(body) >= 1024 or not identity_allowed):
+                candidate = gzip.compress(body, compresslevel=6, mtime=0)
+                if len(candidate) < len(body) or not identity_allowed:
+                    body = candidate
+                    compressed = True
+            if not compressed and not identity_allowed:
+                code, body = 406, b''
             self.send_response(code)
             self.headers_common()
+            self.send_header('Vary', 'Accept-Encoding')
+            if compressed:
+                self.send_header('Content-Encoding', 'gzip')
             self.send_header('Content-Type',kind)
             self.send_header('Content-Length',str(len(body)))
             self.end_headers()

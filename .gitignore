@@ -1,0 +1,7 @@
+data/
+__pycache__/
+*.pyc
+config.json
+.venv/
+node_modules/
+artifacts/

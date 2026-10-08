@@ -24,6 +24,26 @@ def literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def upstream_account_sql(source):
+    # Keep every recorded account/evidence pair; never borrow a parent account.
+    if source in {'webchat','audio'}:
+        evidence = """SELECT r.metadata->'settlement_context'->>'account_id' account_id,'settlement_context' evidence
+            UNION SELECT r.metadata->'failure'->>'last_account_id','failure_last_account'
+            UNION SELECT u.account_id::text,'usage_log' FROM usage_logs u
+                WHERE u.request_id=r.request_id AND u.user_id=r.user_id
+            UNION SELECT e.account_id::text,'gateway_error' FROM ops_error_logs e
+                WHERE (e.request_id=r.request_id OR e.client_request_id=r.request_id) AND e.user_id=r.user_id"""
+    elif source == 'gateway':
+        evidence = "SELECT r.account_id::text account_id,'gateway_error' evidence"
+    else:
+        return "'[]'::json"
+    return """(SELECT coalesce(json_agg(json_build_object(
+        'account_id',evidence.account_id,'name',a.name,'platform',a.platform,
+        'type',a.type,'evidence',evidence.evidence) ORDER BY evidence.account_id,evidence.evidence),'[]'::json)
+        FROM (""" + evidence + """) evidence LEFT JOIN accounts a ON a.id::text=evidence.account_id
+        WHERE evidence.account_id ~ '^[1-9][0-9]*$')"""
+
+
 def build_query(source, cursor, upper, limit):
     if source not in SOURCES:
         raise ValueError("未知日志来源")
@@ -63,6 +83,7 @@ def build_query(source, cursor, upper, limit):
             CASE WHEN r.status IN ('failed','error','timeout') THEN left(r.result,16000) ELSE NULL END error_message,left(r.logs,24000) logs,left(r.result,16000) result,
             length(r.logs)>24000 logs_truncated,length(r.result)>16000 result_truncated"""
         joins = """ LEFT JOIN sub2api_managed_sandbox_session s ON s.id=r.session_id LEFT JOIN "user" u ON u.id=s.user_id LEFT JOIN LATERAL (SELECT CASE WHEN count(DISTINCT nullif(x.sub2api_user_id,''))=1 THEN min(nullif(x.sub2api_user_id,'')) END sub2api_user_id FROM sub2api_webchat_session x WHERE x.user_id=s.user_id) link ON true"""
+    select += "," + upstream_account_sql(source) + " upstream_accounts"
     return f"SELECT {select} FROM {table} r{joins} WHERE {where} ORDER BY {time_col},r.id LIMIT {limit}"
 
 

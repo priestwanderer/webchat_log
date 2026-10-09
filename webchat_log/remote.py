@@ -63,7 +63,7 @@ def build_query(source, cursor, upper, limit):
     common = f"r.id::text id,{literal(source)} source,{date('created_at')} created_at,{date(column)} updated_at"
     if source in {"webchat","audio"}:
         conv = "r.conversation_id" if source == "webchat" else "NULL::text"
-        select = f"{common},r.user_id::text user_id,r.request_id,{conv} conversation_id,r.model,r.status,r.error_code,r.error_message,r.webchat_session_id::text session_id,r.metadata->>'auxiliary_kind' auxiliary_kind,r.metadata->>'trigger_request_id' trigger_request_id,r.metadata->>'parent_request_id' parent_request_id"
+        select = f"{common},r.user_id::text user_id,r.request_id,{conv} conversation_id,r.model,r.status,r.error_code,r.error_message,r.webchat_session_id::text session_id,r.metadata->>'auxiliary_kind' auxiliary_kind,r.metadata->>'trigger_request_id' trigger_request_id,coalesce(nullif(r.metadata->>'parent_request_id',''),nullif(r.metadata->'managed_function_calling'->>'parent_request_id','')) parent_request_id,r.metadata->'managed_function_calling'->>'continuation_items' continuation_items"
         joins = ""
     elif source == "gateway":
         select = f"{common},r.user_id::text user_id,r.request_id,r.client_request_id,r.model,'failed' status,r.error_type error_code,r.error_message,r.error_phase,r.status_code,r.upstream_status_code,r.upstream_error_message,r.network_error_type,r.duration_ms,r.request_path"

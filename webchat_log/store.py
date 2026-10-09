@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from .grouping import describe, fallback_parent, summarize
 
 
 def utc_now():
@@ -185,15 +186,7 @@ class Store:
         for row in rows:
             item = json.loads(row[0])
             item.update(user_name=row[1] or item.get('user_name') or '未归属账号', user_email=row[2] or item.get('user_email') or '')
-            request = item.get('request_id') or ''
-            labels = {'title_generation':'标题','spark_prelude':'开场提示','follow_up_generation':'追问建议'}
-            item['task_type'] = labels.get(item.get('auxiliary_kind')) or ('标题' if request.startswith('req_title_') else '图片子请求' if '-img-call_' in request else '辅助任务' if request.startswith('req_aux_') else '主对话' if item['source']=='webchat' else {'gateway':'关联网关错误','message':'消息执行','tool':'工具执行','audio':'音频转写'}.get(item['source'],item['source']))
-            parent = item.get('parent_request_id') or item.get('trigger_request_id')
-            if not parent:
-                if request.startswith('req_title_'): parent = 'req_'+request[len('req_title_'):]
-                elif request.startswith('req_aux_aux:spark_prelude:'): parent = request.rsplit(':',1)[-1]
-                elif '-img-call_' in request and item['task_type']=='图片子请求': parent = request.split('-img-call_',1)[0]
-            item['parent_request_id'] = parent
+            describe(item)
             item['matched'] = item['key'] in matched
             records.append(item)
         index = {}
@@ -203,8 +196,18 @@ class Store:
         def parent_of(item):
             request = item.get('parent_request_id')
             if not request and item['source']=='gateway': request=item.get('client_request_id') or item.get('request_id')
-            candidates=index.get((item['user_id'],request),[])
-            return candidates[0] if len(candidates)==1 and candidates[0]['key']!=item['key'] else None
+            seen_requests = set()
+            while request and request not in seen_requests:
+                seen_requests.add(request)
+                candidates = index.get((item['user_id'], request), [])
+                if len(candidates) == 1 and candidates[0]['key'] != item['key']:
+                    candidate = candidates[0]
+                    if item.get('conversation_id') and candidate.get('conversation_id') and item['source'] != 'message' and item['conversation_id'] != candidate['conversation_id']:
+                        return None
+                    return candidate
+                if candidates: return None
+                request = fallback_parent(request)
+            return None
         groups = {}
         for item in records:
             root=item; seen={item['key']}
@@ -220,16 +223,7 @@ class Store:
             group['record_count'] = len(members)
             group['matched_count'] = sum(r['key'] in matched for r in members)
             group['error_count'] = sum(bool(r.get('is_error')) for r in members)
-            if group['task_type']!='主对话':
-                group['outcome']='未关联主请求 · '+('失败' if group.get('is_error') else group.get('status','未知'))
-            elif group.get('is_error'): group['outcome']='主任务失败'
-            elif group['status'] in {'completed','success','succeeded'}:
-                failures=[r for r in group['children'] if r.get('is_error')]
-                group['outcome']='主任务成功'
-                if any(r['task_type'] not in {'标题','开场提示','追问建议','辅助任务'} for r in failures): group['outcome']+='，子任务失败'
-                if any(r['task_type'] in {'标题','开场提示','追问建议','辅助任务'} for r in failures): group['outcome']+='，辅助任务失败'
-            else:
-                group['outcome']={'running':'主任务执行中','pending':'主任务等待中','cancelled':'主任务已取消','settlement_pending':'主任务待结算'}.get(group['status'],'主任务状态未知')
+            summarize(group)
             group['children'].sort(key=lambda r:(r.get('created_at',''),r['key']))
             selected.append(group)
         selected.sort(key=lambda r:(r.get('created_at',''),r['key']), reverse=True)
